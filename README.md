@@ -39,8 +39,8 @@ Clone o repositório:
 ```Bash
 git clone [https://github.com/seu-usuario/seu-repo.git](https://github.com/seu-usuario/seu-repo.git)
 cd seu-repo
-Crie um ambiente virtual (Opcional, mas recomendado):
 ```
+Crie um ambiente virtual (Opcional, mas recomendado):
 
 ```Bash
 python -m venv venv
@@ -51,11 +51,10 @@ source venv/bin/activate
 ```
 
 Instale as dependências:
-
 ```Bash
 pip install -r requirements.txt
-Execute o Dashboard:
 ```
+Execute o Dashboard:
 
 ```Bash
 streamlit run app.py
