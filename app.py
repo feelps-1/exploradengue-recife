@@ -32,7 +32,8 @@ def carregar_dados_2024():
             sep=';', 
             encoding='latin1',
             low_memory=False,
-            dayfirst=True # IMPORTANTE: Força leitura de data DD/MM/AAAA
+            dayfirst=True,
+            dtype={'sem_not': str} # Força ler como texto para não perder formato
         )
         
         # Padroniza colunas
@@ -40,13 +41,22 @@ def carregar_dados_2024():
         
         # 1. Tratamento de Datas
         df['dt_notific'] = pd.to_datetime(df['dt_notific'], errors='coerce', dayfirst=True)
-        df['mes'] = df['dt_notific'].dt.month_name()
-        df['semana_epidemiologica'] = df['dt_notific'].dt.isocalendar().week
         
-        # 2. Tratamento da Classificação (SEM FILTRAR NADA AQUI)
+        # --- MUDANÇA: SEMANA EPIDEMIOLÓGICA VIA CAMPO 'sem_not' ---
+        # Formato esperado: '202411' (Ano + Semana)
+        if 'sem_not' in df.columns:
+            # Remove '.0' se tiver vindo como float convertido para string
+            df['sem_not'] = df['sem_not'].astype(str).str.replace(r'\.0$', '', regex=True)
+            
+            # Pega os últimos 2 caracteres para saber a semana (Ex: '202411' -> '11')
+            df['semana_epidemiologica'] = pd.to_numeric(df['sem_not'].str[-2:], errors='coerce')
+        else:
+            # Fallback se não existir a coluna (calcula pela data)
+            df['semana_epidemiologica'] = df['dt_notific'].dt.isocalendar().week
+
+        # 2. Tratamento da Classificação
         df['classi_fin'] = pd.to_numeric(df['classi_fin'], errors='coerce')
         
-        # Cria uma coluna legível de Status para facilitar o filtro
         def definir_status(codigo):
             if codigo in [10, 11, 12]: return "Confirmado"
             elif codigo == 5: return "Descartado"
@@ -67,7 +77,7 @@ def carregar_dados_2024():
             df['nome_distrito'] = df['nome_distrito'].fillna("Distrito Não Identificado")
         else:
             df['nome_distrito'] = "Não Identificado"
-        
+            
         # Tratamento de idade
         if 'nu_idade_n' in df.columns:
              df['nu_idade_n'] = pd.to_numeric(df['nu_idade_n'], errors='coerce')
@@ -89,15 +99,14 @@ if df.empty:
 # --- BARRA LATERAL (FILTROS) ---
 st.sidebar.title("Filtros")
 
-# Debug de Dados (Para você entender a perda)
-st.sidebar.markdown(f"**Total bruto no arquivo:** `{len(df)}` linhas")
+st.sidebar.markdown(f"**Total bruto:** `{len(df)}` linhas")
 
-# 1. Filtro de Status (AQUI ESTAVA O PROBLEMA ANTERIOR)
+# 1. Filtro de Status
 opcoes_status = sorted(df['status_caso'].unique())
 status_selecionado = st.sidebar.multiselect(
     "Status da Notificação:",
     options=opcoes_status,
-    default=opcoes_status # Por padrão seleciona tudo (10k)
+    default=opcoes_status 
 )
 
 # 2. Filtro de Distrito
@@ -112,27 +121,22 @@ else:
     distrito_selecionado = []
 
 # --- APLICAÇÃO DOS FILTROS ---
-# Filtra primeiro por distrito
 df_filtrado = df[df['nome_distrito'].isin(distrito_selecionado)]
-
-# Filtra depois por status
 df_final = df_filtrado[df_filtrado['status_caso'].isin(status_selecionado)]
 
-# Mostra o total filtrado na sidebar
 st.sidebar.markdown(f"**Total exibido:** `{len(df_final)}` linhas")
 st.sidebar.markdown("---")
 
 # Definição de cor dinâmica
 if "Confirmado" in status_selecionado and len(status_selecionado) == 1:
-    cor_tema = '#FF4B4B' # Vermelho se só ver confirmados
+    cor_tema = '#FF4B4B' 
     subtitulo = "Exibindo apenas Casos Confirmados"
 elif "Descartado" in status_selecionado and len(status_selecionado) == 1:
-    cor_tema = '#808080' # Cinza
+    cor_tema = '#808080' 
     subtitulo = "Exibindo apenas Casos Descartados"
 else:
-    cor_tema = '#1F77B4' # Azul
-    subtitulo = "Exibindo Total de Notificações (Suspeitos + Confirmados + Descartados)"
-
+    cor_tema = '#1F77B4' 
+    subtitulo = "Exibindo Total de Notificações"
 
 # --- LAYOUT DO DASHBOARD ---
 st.title(f"🦟 Dashboard Dengue Recife - 2024")
@@ -148,19 +152,16 @@ st.markdown("---")
 col1, col2, col3, col4 = st.columns(4)
 
 total_exibido = len(df_final)
-# Confirmados dentro da seleção atual
 confirmados_reais = len(df_final[df_final['classi_fin'].isin([10, 11, 12])])
-# Investigação (Null)
 em_investigacao = len(df_final[pd.isna(df_final['classi_fin'])])
 
-# Bairro critico (ignorando branco)
 bairros_validos = df_final[~df_final['nm_bairro'].isin(["NÃO INFORMADO", "NAN"])]
 if not bairros_validos.empty:
     bairro_pior = bairros_validos['nm_bairro'].mode()[0]
 else:
     bairro_pior = "-"
 
-col1.metric("Total Notificações (Filtro)", f"{total_exibido:,}")
+col1.metric("Total (Filtro)", f"{total_exibido:,}")
 col2.metric("Confirmados", f"{confirmados_reais:,}")
 col3.metric("Em Investigação", f"{em_investigacao:,}")
 col4.metric("Bairro Crítico", f"{bairro_pior}")
@@ -168,25 +169,44 @@ col4.metric("Bairro Crítico", f"{bairro_pior}")
 st.markdown("### 📈 Curva Epidêmica")
 
 if not df_final.empty:
-    # Agrupa por dia
-    casos_diarios = df_final.groupby('dt_notific').size().reset_index(name='Casos')
-    casos_diarios = casos_diarios.sort_values('dt_notific')
+    tab1, tab2 = st.tabs(["Por Semana Epidemiológica (SEM_NOT)", "Evolução Diária (DT_NOTIFIC)"])
     
-    # Média móvel
-    casos_diarios['Media_Movel'] = casos_diarios['Casos'].rolling(window=7).mean()
+    with tab1:
+        # Agrupa pela nova lógica SEM_NOT
+        casos_semanais = df_final.groupby('semana_epidemiologica').size().reset_index(name='Casos')
+        # Garante ordenação
+        casos_semanais = casos_semanais.sort_values('semana_epidemiologica')
+        
+        fig_semana = px.bar(
+            casos_semanais, 
+            x='semana_epidemiologica', 
+            y='Casos',
+            title="Casos por Semana Epidemiológica (Extraído de SEM_NOT)",
+            labels={'semana_epidemiologica': 'Semana (1-53)', 'Casos': 'Quantidade'},
+            color_discrete_sequence=[cor_tema]
+        )
+        # Ajusta eixo X para mostrar todas as semanas se couber
+        fig_semana.update_xaxes(type='category')
+        st.plotly_chart(fig_semana, use_container_width=True)
 
-    # Gráfico
-    fig_diario = go.Figure()
-    fig_diario.add_trace(go.Bar(
-        x=casos_diarios['dt_notific'], y=casos_diarios['Casos'],
-        name='Notificações', marker_color=cor_tema, opacity=0.5
-    ))
-    fig_diario.add_trace(go.Scatter(
-        x=casos_diarios['dt_notific'], y=casos_diarios['Media_Movel'],
-        name='Média Móvel (7d)', line=dict(color='black', width=2)
-    ))
-    fig_diario.update_layout(title="Evolução Diária das Notificações", template='plotly_white')
-    st.plotly_chart(fig_diario, use_container_width=True)
+    with tab2:
+        # Agrupa por dia (dt_notific)
+        casos_diarios = df_final.groupby('dt_notific').size().reset_index(name='Casos')
+        casos_diarios = casos_diarios.sort_values('dt_notific')
+        
+        casos_diarios['Media_Movel'] = casos_diarios['Casos'].rolling(window=7).mean()
+
+        fig_diario = go.Figure()
+        fig_diario.add_trace(go.Bar(
+            x=casos_diarios['dt_notific'], y=casos_diarios['Casos'],
+            name='Notificações', marker_color=cor_tema, opacity=0.5
+        ))
+        fig_diario.add_trace(go.Scatter(
+            x=casos_diarios['dt_notific'], y=casos_diarios['Media_Movel'],
+            name='Média Móvel (7d)', line=dict(color='black', width=2)
+        ))
+        fig_diario.update_layout(title="Evolução Diária das Notificações", template='plotly_white')
+        st.plotly_chart(fig_diario, use_container_width=True)
 else:
     st.warning("Nenhum dado disponível para o filtro selecionado.")
 
