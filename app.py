@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="Monitoramento Dengue Recife 2024",
@@ -8,12 +9,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🦟 Dashboard Dengue Recife - 2024")
-st.markdown("""
-Monitoramento dos casos de dengue notificados no ano de **2024**.
-Utilize os filtros laterais para analisar regiões específicas.
-""")
-
+# --- CONFIGURAÇÃO E DADOS ---
 CAMINHO_ARQUIVO = "./dados-historicos/dengue-recife-2024.csv"
 
 MAPA_DISTRITOS = {
@@ -39,17 +35,27 @@ def carregar_dados_2024():
         
         df.columns = df.columns.str.lower().str.strip()
         
+        # Tratamento de Datas
         df['dt_notific'] = pd.to_datetime(df['dt_notific'], errors='coerce')
         df['mes'] = df['dt_notific'].dt.month_name()
         
-        df['classi_fin'] = pd.to_numeric(df['classi_fin'], errors='coerce')
-        df = df[df['classi_fin'] != 5]
+        # --- MELHORIA 1: Semana Epidemiológica ---
+        # Cria a coluna da semana do ano (1 a 52/53)
+        df['semana_epidemiologica'] = df['dt_notific'].dt.isocalendar().week
         
+        # Tratamento da Classificação Final
+        df['classi_fin'] = pd.to_numeric(df['classi_fin'], errors='coerce')
+        df = df[df['classi_fin'] != 5] # Remove descartados
+        
+        # Tratamento de Distritos
         if 'id_distrit' in df.columns:
             df['id_distrit'] = pd.to_numeric(df['id_distrit'], errors='coerce')
             df['nome_distrito'] = df['id_distrit'].map(MAPA_DISTRITOS)
             df['nome_distrito'] = df['nome_distrito'].fillna(df['id_distrit'].astype(str))
         
+        if 'nu_idade_n' in df.columns:
+             df['nu_idade_n'] = pd.to_numeric(df['nu_idade_n'], errors='coerce')
+
         return df
 
     except FileNotFoundError:
@@ -64,58 +70,141 @@ df = carregar_dados_2024()
 if df.empty:
     st.stop()
 
-st.sidebar.header("Filtros")
+# --- BARRA LATERAL (FILTROS) ---
+st.sidebar.header("Configurações")
 
+# Filtro de Visualização
+tipo_visualizacao = st.sidebar.radio(
+    "Tipo de Análise:",
+    ("Todas Notificações", "Apenas Casos Confirmados")
+)
+
+# Filtro de Distrito
 if 'nome_distrito' in df.columns:
     distritos_disponiveis = sorted(df['nome_distrito'].dropna().unique().astype(str))
     distrito_selecionado = st.sidebar.multiselect(
-        "Selecione o Distrito Sanitário:",
+        "Filtrar por Distrito Sanitário:",
         options=distritos_disponiveis,
         default=distritos_disponiveis
     )
-    
-    df_filtrado = df[df['nome_distrito'].isin(distrito_selecionado)]
+    df_filtrado_geo = df[df['nome_distrito'].isin(distrito_selecionado)]
 else:
-    st.warning("Coluna de distrito não identificada corretamente.")
-    df_filtrado = df
+    df_filtrado_geo = df
+
+# Aplicação do Filtro de Confirmação
+if tipo_visualizacao == "Apenas Casos Confirmados":
+    codigos_confirmados = [10, 11, 12] 
+    df_final = df_filtrado_geo[df_filtrado_geo['classi_fin'].isin(codigos_confirmados)]
+    subtitulo = "Exibindo apenas casos confirmados (Dengue Clássica, Com Sinais de Alarme e Grave)."
+    cor_tema = '#FF4B4B' # Vermelho para confirmados
+else:
+    df_final = df_filtrado_geo
+    subtitulo = "Exibindo todas as notificações (Suspeitos + Confirmados)."
+    cor_tema = '#1F77B4' # Azul para notificações gerais
+
+# --- LAYOUT PRINCIPAL ---
+st.title(f"🦟 Dashboard Dengue Recife - 2024")
+st.markdown(f"**Modo:** {tipo_visualizacao}")
+st.caption(subtitulo)
+
+# --- MELHORIA 4: Botão de Download ---
+csv = df_final.to_csv(index=False).encode('utf-8')
+st.download_button(
+    label="📥 Baixar Dados Filtrados (CSV)",
+    data=csv,
+    file_name='dengue_recife_filtrado.csv',
+    mime='text/csv',
+)
 
 st.markdown("---")
-col1, col2, col3 = st.columns(3)
 
-total_casos = len(df_filtrado)
-casos_graves = len(df_filtrado[df_filtrado['classi_fin'].isin([12, 13])])
+# --- KPIs (Com Melhoria 3) ---
+col1, col2, col3, col4 = st.columns(4)
 
-if not df_filtrado.empty and 'nm_bairro' in df_filtrado.columns:
-    bairro_pior = df_filtrado['nm_bairro'].mode()[0]
+total_casos = len(df_final)
+casos_graves = len(df_final[df_final['classi_fin'] == 12]) 
+
+# --- MELHORIA 3: KPI de % de Gravidade ---
+percentual_graves = (casos_graves / total_casos * 100) if total_casos > 0 else 0
+
+if not df_final.empty and 'nm_bairro' in df_final.columns:
+    bairro_pior = df_final['nm_bairro'].mode()[0]
 else:
     bairro_pior = "-"
 
-col1.metric("Total Notificações (2024)", f"{total_casos:,}")
-col2.metric("Casos Graves/Alarme", f"{casos_graves}")
-col3.metric("Bairro Crítico", f"{bairro_pior}")
+col1.metric("Total de Registros", f"{total_casos:,}")
+col2.metric("Casos Graves (Absoluto)", f"{casos_graves}")
+col3.metric("Taxa de Gravidade", f"{percentual_graves:.2f}%")
+col4.metric("Bairro Crítico", f"{bairro_pior}")
 
-st.markdown("### Análise Temporal e Espacial")
+st.markdown("### 📈 Análise Temporal Avançada")
 
-row1_col1, row1_col2 = st.columns([2, 1])
+# Preparação dos dados temporais
+if not df_final.empty:
+    # Agrupamento Diário
+    casos_diarios = df_final.groupby('dt_notific').size().reset_index(name='Casos')
+    casos_diarios = casos_diarios.sort_values('dt_notific')
+    
+    # --- MELHORIA 2: Cálculo da Média Móvel (7 dias) ---
+    casos_diarios['Media_Movel_7d'] = casos_diarios['Casos'].rolling(window=7).mean()
 
-with row1_col1:
-    st.subheader("Evolução dos Casos em 2024")
-    if not df_filtrado.empty:
-        casos_por_data = df_filtrado.groupby('dt_notific').size().reset_index(name='Casos')
+    # Agrupamento Semanal (Melhoria 1)
+    casos_semanais = df_final.groupby('semana_epidemiologica').size().reset_index(name='Casos')
+
+    tab1, tab2 = st.tabs(["Evolução Diária (+ Tendência)", "Por Semana Epidemiológica"])
+
+    with tab1:
+        # Gráfico Misto (Barras + Linha de Tendência) usando Graph Objects
+        fig_diario = go.Figure()
         
-        fig_linha = px.line(
-            casos_por_data, 
-            x='dt_notific', 
-            y='Casos', 
-            title='Curva Epidêmica Diária',
+        # Barras (Casos Reais)
+        fig_diario.add_trace(go.Bar(
+            x=casos_diarios['dt_notific'],
+            y=casos_diarios['Casos'],
+            name='Casos Diários',
+            marker_color=cor_tema,
+            opacity=0.4
+        ))
+        
+        # Linha (Média Móvel)
+        fig_diario.add_trace(go.Scatter(
+            x=casos_diarios['dt_notific'],
+            y=casos_diarios['Media_Movel_7d'],
+            name='Média Móvel (7 dias)',
+            line=dict(color='black', width=2),
+            mode='lines'
+        ))
+        
+        fig_diario.update_layout(
+            title="Curva Epidêmica com Tendência Suavizada",
+            xaxis_title="Data de Notificação",
+            yaxis_title="Quantidade de Casos",
+            legend=dict(x=0, y=1.0),
             template='plotly_white'
         )
-        st.plotly_chart(fig_linha, use_container_width=True)
+        st.plotly_chart(fig_diario, use_container_width=True)
+        st.info("ℹ️ A linha preta representa a **Média Móvel de 7 dias**, ideal para visualizar a tendência real sem as oscilações de fins de semana.")
 
-with row1_col2:
+    with tab2:
+        # Gráfico por Semana Epidemiológica
+        fig_semanal = px.bar(
+            casos_semanais,
+            x='semana_epidemiologica',
+            y='Casos',
+            title='Casos por Semana Epidemiológica (SE)',
+            labels={'semana_epidemiologica': 'Semana Epidemiológica (SE)', 'Casos': 'Total de Casos'},
+            color_discrete_sequence=[cor_tema]
+        )
+        st.plotly_chart(fig_semanal, use_container_width=True)
+
+st.markdown("### 🗺️ Análise Espacial e Demográfica")
+
+row2_col1, row2_col2 = st.columns([1, 1])
+
+with row2_col1:
     st.subheader("Top 10 Bairros")
-    if not df_filtrado.empty and 'nm_bairro' in df_filtrado.columns:
-        casos_por_bairro = df_filtrado['nm_bairro'].value_counts().head(10).reset_index()
+    if not df_final.empty and 'nm_bairro' in df_final.columns:
+        casos_por_bairro = df_final['nm_bairro'].value_counts().head(10).reset_index()
         casos_por_bairro.columns = ['Bairro', 'Casos']
         
         fig_barras = px.bar(
@@ -123,78 +212,41 @@ with row1_col2:
             x='Casos', 
             y='Bairro', 
             orientation='h',
-            title='Bairros com maior incidência'
+            text_auto=True,
+            color_discrete_sequence=[cor_tema]
         )
         fig_barras.update_layout(yaxis={'categoryorder':'total ascending'})
         st.plotly_chart(fig_barras, use_container_width=True)
 
-with st.expander("Ver dados brutos (Amostra)"):
-    col_visualizacao = ['dt_notific', 'nome_distrito', 'nm_bairro', 'classi_fin', 'mes']
-    cols_existentes = [c for c in col_visualizacao if c in df_filtrado.columns]
-    st.dataframe(df_filtrado[cols_existentes].head(100))
-
-st.markdown("### Perfil dos Pacientes")
-
-col_perfil1, col_perfil2 = st.columns(2)
-
-with col_perfil1:
-    st.subheader("Distribuição por Sexo")
-    if 'cs_sexo' in df_filtrado.columns:
-        df_sexo = df_filtrado['cs_sexo'].value_counts().reset_index()
-        df_sexo.columns = ['Sexo', 'Quantidade']
+with row2_col2:
+    st.subheader("Pirâmide Etária (Simulada)")
+    if 'nu_idade_n' in df_final.columns and 'cs_sexo' in df_final.columns:
+        df_idade = df_final[(df_final['nu_idade_n'] < 100) & (df_final['cs_sexo'].isin(['M', 'F']))]
         
-        fig_sexo = px.pie(
-            df_sexo, 
-            values='Quantidade', 
-            names='Sexo', 
-            color='Sexo',
-            color_discrete_map={'M': '#36A2EB', 'F': '#FF6384', 'I': '#C9CBCF'},
-            hole=0.4
+        # Criação de faixas etárias (Bins)
+        bins = [0, 10, 20, 30, 40, 50, 60, 70, 80, 100]
+        labels = ['0-9', '10-19', '20-29', '30-39', '40-49', '50-59', '60-69', '70-79', '80+']
+        df_idade['faixa_etaria'] = pd.cut(df_idade['nu_idade_n'], bins=bins, labels=labels, right=False)
+        
+        # Agrupamento
+        df_pyramid = df_idade.groupby(['faixa_etaria', 'cs_sexo'], observed=False).size().reset_index(name='Casos')
+        
+        # Ajuste para pirâmide (Homens negativo para ficar na esquerda)
+        df_pyramid['Casos_Plot'] = df_pyramid.apply(lambda x: -x['Casos'] if x['cs_sexo'] == 'M' else x['Casos'], axis=1)
+        
+        fig_pyramid = px.bar(
+            df_pyramid,
+            x='Casos_Plot',
+            y='faixa_etaria',
+            color='cs_sexo',
+            orientation='h',
+            title='Distribuição por Faixa Etária e Sexo',
+            labels={'Casos_Plot': 'Quantidade de Casos', 'faixa_etaria': 'Faixa Etária'},
+            color_discrete_map={'M': '#36A2EB', 'F': '#FF6384'}
         )
-        st.plotly_chart(fig_sexo, use_container_width=True)
-    else:
-        st.warning("Coluna 'cs_sexo' não encontrada.")
-
-with col_perfil2:
-    st.subheader("Distribuição por Idade")
-    if 'nu_idade_n' in df_filtrado.columns:
-        df_filtrado['nu_idade_n'] = pd.to_numeric(df_filtrado['nu_idade_n'], errors='coerce')
-        
-        df_idade = df_filtrado[df_filtrado['nu_idade_n'] < 120]
-        
-        if not df_idade.empty:
-            fig_idade = px.box(
-                df_idade, 
-                y="nu_idade_n", 
-                x="cs_sexo",
-                color="cs_sexo",
-                title="Dispersão de Idade por Sexo",
-                labels={"nu_idade_n": "Idade (Anos)", "cs_sexo": "Sexo"}
-            )
-            st.plotly_chart(fig_idade, use_container_width=True)
-            
-            media_idade = df_idade['nu_idade_n'].mean()
-            mediana_idade = df_idade['nu_idade_n'].median()
-            st.info(f"💡 Estatística: A idade média é **{media_idade:.1f} anos** e a mediana é **{mediana_idade:.0f} anos**.")
-    else:
-        st.warning("Coluna 'nu_idade_n' não encontrada.")
-
-st.markdown("### Matriz de Risco: Onde e Quando?")
-st.markdown("Visualização da intensidade de casos cruzando o Local (Distrito) com o Tempo (Mês).")
-
-if 'mes' in df_filtrado.columns and 'nome_distrito' in df_filtrado.columns:
-    heatmap_data = df_filtrado.groupby(['nome_distrito', 'mes']).size().reset_index(name='Casos')
-    
-    ordem_meses = ['January', 'February', 'March', 'April', 'May', 'June', 
-                   'July', 'August', 'September', 'October', 'November', 'December']
-    
-    fig_heatmap = px.density_heatmap(
-        heatmap_data, 
-        x="mes", 
-        y="nome_distrito", 
-        z="Casos", 
-        color_continuous_scale="Reds",
-        title="Intensidade de Casos",
-        category_orders={"mes": ordem_meses}
-    )
-    st.plotly_chart(fig_heatmap, use_container_width=True)
+        # Formata o eixo X para mostrar números positivos dos dois lados
+        fig_pyramid.update_layout(
+            barmode='overlay', 
+            xaxis=dict(tickvals=[-1000, -500, 0, 500, 1000], ticktext=['1000', '500', '0', '500', '1000'])
+        )
+        st.plotly_chart(fig_pyramid, use_container_width=True)
